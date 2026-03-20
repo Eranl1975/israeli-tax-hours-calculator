@@ -8,7 +8,6 @@
 import Tesseract from 'tesseract.js';
 import * as pdfjsLib from 'pdfjs-dist';
 
-// Configure the pdfjs worker (Vite resolves this at build time)
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
   import.meta.url,
@@ -31,10 +30,7 @@ export type OcrProgressCallback = (pct: number, status: string) => void;
 // ---------------------------------------------------------------------------
 // Step 1: File → image data URL
 // ---------------------------------------------------------------------------
-export async function fileToImageDataUrl(
-  file: File,
-  onProgress: OcrProgressCallback,
-): Promise<string> {
+export async function fileToImageDataUrl(file: File, onProgress: OcrProgressCallback): Promise<string> {
   if (file.type === 'application/pdf') {
     onProgress(5, 'טוען PDF...');
     return await pdfFirstPageToDataUrl(file);
@@ -51,26 +47,19 @@ async function pdfFirstPageToDataUrl(file: File): Promise<string> {
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   const page = await pdf.getPage(1);
-
-  // Scale 2.0 for better OCR quality
   const viewport = page.getViewport({ scale: 2.0 });
   const canvas = document.createElement('canvas');
   canvas.width = viewport.width;
   canvas.height = viewport.height;
-
   const ctx = canvas.getContext('2d')!;
   await page.render({ canvasContext: ctx, viewport, canvas }).promise;
-
   return canvas.toDataURL('image/png');
 }
 
 // ---------------------------------------------------------------------------
-// Step 2: Image → OCR text via Tesseract
+// Step 2: OCR
 // ---------------------------------------------------------------------------
-export async function runOcr(
-  imageDataUrl: string,
-  onProgress: OcrProgressCallback,
-): Promise<string> {
+export async function runOcr(imageDataUrl: string, onProgress: OcrProgressCallback): Promise<string> {
   const result = await Tesseract.recognize(imageDataUrl, 'heb+eng', {
     logger: m => {
       if (m.status === 'recognizing text') {
@@ -82,91 +71,166 @@ export async function runOcr(
 }
 
 // ---------------------------------------------------------------------------
-// Step 3: Text → ExtractedPayslipData via regex
+// Step 3: Flexible line-by-line parser
 // ---------------------------------------------------------------------------
 
-/**
- * Remove commas from number strings and parse to float.
- */
 function cleanNum(s: string): number {
-  return parseFloat(s.replace(/,/g, ''));
+  return parseFloat(s.replace(/,/g, '').replace(/\.(\d{3})/g, '$1'));
+}
+
+/** Extract all numbers from a string, return largest or first depending on context */
+function extractNumbers(s: string): number[] {
+  const matches = s.match(/[\d,]+(?:\.\d+)?/g) ?? [];
+  return matches.map(m => cleanNum(m)).filter(n => !isNaN(n) && n >= 0);
+}
+
+/** Find the first number in string that passes the validator */
+function firstValid(s: string, validate: (n: number) => boolean): number | undefined {
+  for (const n of extractNumbers(s)) {
+    if (validate(n)) return n;
+  }
+  return undefined;
+}
+
+/** Find the largest number in string that passes the validator */
+function largestValid(s: string, validate: (n: number) => boolean): number | undefined {
+  const valid = extractNumbers(s).filter(validate);
+  return valid.length > 0 ? Math.max(...valid) : undefined;
+}
+
+// ---- Label keyword banks ----
+// Each bank lists all Hebrew synonyms / abbreviations for a field.
+// The parser scans each line: if any keyword matches, it extracts the number
+// from that line (or the next line if current line has no suitable number).
+
+const SALARY_KEYWORDS = [
+  // Standard labels
+  'שכר יסוד', 'שכר בסיס', 'שכר בסיסי', 'שכר ברוטו', 'שכר חודשי',
+  'שי', 'ש.י', 'ש"י', 'שכ.י', 'שכ"י',
+  'משכורת יסוד', 'משכורת בסיס', 'משכורת ברוטו', 'משכורת',
+  'ברוטו לחישוב', 'ברוטו ל.ב.ה', 'שכר (ב)',
+  'קצובת שכר', 'שכר קבוע',
+];
+
+const HOURS_KEYWORDS = [
+  'ס"ה שעות', 'סה"כ שעות', 'ס.ה שעות', 'סהכ שעות',
+  'שעות עבודה', 'שעות רגילות', 'שעות חודש', 'שע. עבודה',
+  'שעות נוכחות', 'שע\'ות', 'שע רגילות', 'שע.ר',
+  'כמות שעות', 'מס. שעות', 'מספר שעות',
+];
+
+const DAYS_KEYWORDS = [
+  'ימי עבודה', 'ימי נוכחות', 'ימי חודש', 'מס. ימים', 'מספר ימים',
+  'י. עבודה', 'י.ע', 'יע ', 'ימים ',
+];
+
+const CREDIT_KEYWORDS = [
+  'נקודות זיכוי', 'נקודות מס', 'נ.ז', 'נ"ז', 'זיכוי נקודות',
+  'נקודות (מס)', 'נקודות ז.',
+];
+
+const OVERTIME_KEYWORDS = [
+  'שעות נוספות', 'שע. נוספות', 'שעות נוסף', 'גמול שע. נוספות',
+  'גמול שעות נוספות', 'שע"נ', 'שעות נ.',
+  'תוספת שעות נוספות', 'ש.נ',
+];
+
+const BONUS_KEYWORDS = [
+  'בונוס', 'פרמיה', 'מענק', 'תגמול', 'מענק מיוחד',
+  'פרמיית ביצועים', 'בונוס חודשי', 'גמול',
+];
+
+const PENSION_KEYWORDS = [
+  'פנסיה', 'קרן פנסיה', 'ק. פנסיה', 'קה"ש עובד', 'קופת גמל עובד',
+  'פנסיה עובד', 'הפרשת עובד', 'תגמולי עובד',
+];
+
+function normalize(s: string): string {
+  return s
+    .replace(/[""״]/g, '"')
+    .replace(/['׳]/g, "'")
+    .replace(/\r\n|\r/g, '\n')
+    .replace(/[ \t]+/g, ' ');
+}
+
+function lineContainsAny(line: string, keywords: readonly string[]): boolean {
+  const l = line.toLowerCase();
+  return keywords.some(kw => l.includes(kw.toLowerCase()));
 }
 
 /**
- * Search for a numeric value near a Hebrew label pattern.
- * Tries each pattern in order; returns the first match.
+ * Scan lines for a field. When a line matches a keyword, extract a number from
+ * that line or the next non-empty line (handles label-on-one-line, value-on-next).
+ * Also handles reversed layout: number first, then label on same line.
  */
-function findValue(text: string, patterns: RegExp[]): number | undefined {
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) {
-      const raw = match[match.length - 1]; // last capture group
-      const n = cleanNum(raw);
-      if (!isNaN(n) && n > 0) return n;
+function scanLines(
+  lines: string[],
+  keywords: string[],
+  validate: (n: number) => boolean,
+  strategy: 'first' | 'largest' = 'largest',
+): number | undefined {
+  for (let i = 0; i < lines.length; i++) {
+    if (!lineContainsAny(lines[i], keywords)) continue;
+    // Try current line
+    const pick = strategy === 'largest' ? largestValid : firstValid;
+    let val = pick(lines[i], validate);
+    if (val !== undefined) return val;
+    // Try next non-empty line
+    for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+      if (lines[j].trim() === '') continue;
+      val = pick(lines[j], validate);
+      if (val !== undefined) return val;
+      break;
     }
   }
   return undefined;
 }
 
-export function parsePayslipText(text: string): ExtractedPayslipData {
-  // Normalize: collapse multiple spaces, unify quote chars
-  const t = text
-    .replace(/[""״]/g, '"')
-    .replace(/\r\n/g, '\n')
-    .replace(/[ \t]+/g, ' ');
-
+export function parsePayslipText(rawText: string): ExtractedPayslipData {
+  const t = normalize(rawText);
+  const lines = t.split('\n');
   const data: ExtractedPayslipData = {};
 
-  // Base monthly gross — שכר יסוד / שכר בסיס / שכר ברוטו
-  const baseGross = findValue(t, [
-    /שכר\s*(יסוד|בסיס|בסיסי)\s*[:\-]?\s*([\d,]+)/i,
-    /שכר\s*ברוטו\s*[:\-]?\s*([\d,]+)/i,
-    /משכורת\s*[:\-]?\s*([\d,]+)/i,
-    /ברוטו\s*[:\-]?\s*([\d,]+)/i,
-  ]);
-  if (baseGross && baseGross >= 1000) data.baseMonthlyGross = baseGross;
+  // Base monthly gross — must be >= 1,000 NIS and <= 200,000
+  const gross = scanLines(lines, SALARY_KEYWORDS, n => n >= 1000 && n <= 200000, 'largest');
+  if (gross) data.baseMonthlyGross = gross;
 
-  // Planned monthly hours — ס"ה שעות / שעות עבודה
-  const hours = findValue(t, [
-    /ס["']?ה\s*שעות\s*[:\-]?\s*([\d.]+)/i,
-    /שעות\s*(עבודה|חודש)\s*[:\-]?\s*([\d.]+)/i,
-    /סה["']כ\s*שעות\s*[:\-]?\s*([\d.]+)/i,
-  ]);
-  if (hours && hours >= 1 && hours <= 400) data.plannedMonthlyHours = hours;
+  // Hours — 1–400
+  const hours = scanLines(lines, HOURS_KEYWORDS, n => n >= 1 && n <= 400, 'first');
+  if (hours) data.plannedMonthlyHours = hours;
 
-  // Workdays — ימי עבודה / ימי נוכחות
-  const days = findValue(t, [
-    /ימי?\s*(עבודה|נוכחות|חודש)\s*[:\-]?\s*(\d{1,2})/i,
-    /ימים\s*[:\-]?\s*(\d{1,2})/i,
-  ]);
-  if (days && days >= 1 && days <= 31) data.workdaysInMonth = days;
+  // Work days — 1–31
+  const days = scanLines(lines, DAYS_KEYWORDS, n => n >= 1 && n <= 31, 'first');
+  if (days) data.workdaysInMonth = days;
 
-  // Credit points — נקודות זיכוי
-  const credits = findValue(t, [
-    /נקודות?\s*זיכוי\s*[:\-]?\s*([\d.]+)/i,
-    /זיכוי\s*נקודות?\s*[:\-]?\s*([\d.]+)/i,
-  ]);
-  if (credits && credits >= 0.5 && credits <= 20) data.creditPoints = credits;
+  // Credit points — 0.5–20
+  const credits = scanLines(lines, CREDIT_KEYWORDS, n => n >= 0.5 && n <= 20, 'first');
+  if (credits) data.creditPoints = credits;
 
-  // Pension contribution % — פנסיה / קרן פנסיה (employee %)
-  const pensionPctMatch = t.match(/(?:פנסיה|קרן\s*פנסיה)[^\n]{0,40}?(\d{1,2}(?:\.\d+)?)\s*%/i);
-  if (pensionPctMatch) {
-    const pct = parseFloat(pensionPctMatch[1]);
+  // Overtime income (NIS amount, not hours) — >= 100
+  const overtime = scanLines(lines, OVERTIME_KEYWORDS, n => n >= 100 && n <= 100000, 'largest');
+  if (overtime) data.overtimeIncome = overtime;
+
+  // Bonus — >= 100
+  const bonus = scanLines(lines, BONUS_KEYWORDS, n => n >= 100 && n <= 200000, 'largest');
+  if (bonus) data.bonusIncome = bonus;
+
+  // Pension % — look for a percentage sign near pension keywords
+  // Try special pension % regex first (most reliable)
+  const pensionPctRx = t.match(
+    /(?:פנסיה|קרן\s*פנסיה|ק\.\s*פנסיה|הפרשת\s*עובד|תגמולי\s*עובד)[^\n]{0,60}?(\d{1,2}(?:\.\d+)?)\s*%/i,
+  );
+  if (pensionPctRx) {
+    const pct = parseFloat(pensionPctRx[1]);
     if (pct >= 0.5 && pct <= 20) data.pensionContributionPct = pct;
+  } else {
+    // Fallback: scan pension lines for small numbers (2–20) assuming it's a %
+    const pensionLine = lines.find(l => lineContainsAny(l, PENSION_KEYWORDS));
+    if (pensionLine) {
+      const pct = firstValid(pensionLine, n => n >= 2 && n <= 20);
+      if (pct) data.pensionContributionPct = pct;
+    }
   }
-
-  // Overtime income — שעות נוספות (as NIS amount, not hours)
-  const overtime = findValue(t, [
-    /שעות\s*נוספות\s*(?:[\d.]+\s*שע[^\n]{0,10})?\s*([\d,]+)/i,
-    /גמול\s*שעות\s*נוספות\s*[:\-]?\s*([\d,]+)/i,
-  ]);
-  if (overtime && overtime >= 100) data.overtimeIncome = overtime;
-
-  // Bonus — בונוס / פרמיה / מענק
-  const bonus = findValue(t, [
-    /(?:בונוס|פרמיה|מענק)\s*[:\-]?\s*([\d,]+)/i,
-  ]);
-  if (bonus && bonus >= 100) data.bonusIncome = bonus;
 
   return data;
 }

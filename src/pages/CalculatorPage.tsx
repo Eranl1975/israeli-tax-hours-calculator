@@ -31,9 +31,9 @@ type Tab = 'results' | 'comparison';
 
 export function CalculatorPage() {
   const [inputs, setInputs] = useState<UserInputs>(DEFAULT_INPUTS);
-  // Snapshot of inputs at the moment "חשב" was clicked
   const [submitted, setSubmitted] = useState<UserInputs | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>('results');
+  const [uploaderResetKey, setUploaderResetKey] = useState(0);
 
   const config = submitted ? getTaxConfigById(submitted.taxConfigId) : getTaxConfigById(inputs.taxConfigId);
 
@@ -52,6 +52,7 @@ export function CalculatorPage() {
     setInputs(DEFAULT_INPUTS);
     setSubmitted(null);
     setActiveTab('results');
+    setUploaderResetKey(k => k + 1);
   }
 
   function handleApplyPayslip(data: ExtractedPayslipData) {
@@ -96,7 +97,7 @@ export function CalculatorPage() {
 
           {/* Left column: form */}
           <div className="flex flex-col gap-4">
-            <PayslipUploader onApply={handleApplyPayslip} />
+            <PayslipUploader onApply={handleApplyPayslip} resetKey={uploaderResetKey} />
             <InputForm
               inputs={inputs}
               taxConfigs={ALL_TAX_CONFIGS}
