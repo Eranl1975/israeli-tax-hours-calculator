@@ -6,6 +6,8 @@ import { APP_CONFIG } from '../config/appConfig';
 import { InputForm } from '../components/InputForm';
 import { ResultsCards } from '../components/ResultsCards';
 import { ComparisonView } from '../components/ComparisonView';
+import { PayslipUploader } from '../components/PayslipUploader';
+import type { ExtractedPayslipData } from '../services/payslipExtractor';
 
 const DEFAULT_CONFIG_ID = ALL_TAX_CONFIGS.find(c => c.isDefault)?.id ?? ALL_TAX_CONFIGS[0].id;
 
@@ -52,6 +54,22 @@ export function CalculatorPage() {
     setActiveTab('results');
   }
 
+  function handleApplyPayslip(data: ExtractedPayslipData) {
+    setInputs(prev => ({
+      ...prev,
+      ...(data.baseMonthlyGross !== undefined && { baseMonthlyGross: data.baseMonthlyGross }),
+      ...(data.plannedMonthlyHours !== undefined && { plannedMonthlyHours: data.plannedMonthlyHours }),
+      ...(data.workdaysInMonth !== undefined && { workdaysInMonth: data.workdaysInMonth }),
+      ...(data.creditPoints !== undefined && { creditPoints: data.creditPoints }),
+      ...(data.pensionContributionPct !== undefined && { pensionContributionPct: data.pensionContributionPct }),
+      ...(data.overtimeIncome !== undefined && { overtimeIncome: data.overtimeIncome }),
+      ...(data.bonusIncome !== undefined && { bonusIncome: data.bonusIncome }),
+      ...(data.additionalTaxableMonthly !== undefined && { additionalTaxableMonthly: data.additionalTaxableMonthly }),
+      ...(data.secondEmployerIncome !== undefined && { secondEmployerIncome: data.secondEmployerIncome }),
+    }));
+    setSubmitted(null); // Reset results so user clicks "חשב" again after auto-fill
+  }
+
   const hasResults = submitted !== null && results !== null;
 
   return (
@@ -78,6 +96,7 @@ export function CalculatorPage() {
 
           {/* Left column: form */}
           <div className="flex flex-col gap-4">
+            <PayslipUploader onApply={handleApplyPayslip} />
             <InputForm
               inputs={inputs}
               taxConfigs={ALL_TAX_CONFIGS}
