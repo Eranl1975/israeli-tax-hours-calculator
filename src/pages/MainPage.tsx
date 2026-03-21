@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import type { PayslipData, PayslipComponent, ResultTab } from '../models/types';
+import type { ExtractedSummary } from '../services/payslipExtractor';
 import { calculateResults } from '../domain/calculationEngine';
 import { getIncomeTaxConfigByYear } from '../tax/incomeTaxConfig';
 import { createMockPayslip } from '../domain/mockData';
@@ -54,8 +55,23 @@ export function MainPage() {
     try { return calculateResults(data); } catch { return null; }
   }, [data]);
 
-  function handleImportComponents(comps: PayslipComponent[]) {
-    setData(prev => ({ ...prev, components: [...prev.components, ...comps] }));
+  function handleImportComponents(comps: PayslipComponent[], summary: ExtractedSummary) {
+    setData(prev => ({
+      ...prev,
+      components: [...prev.components, ...comps],
+      header: {
+        ...prev.header,
+        ...(summary.taxYear  ? { taxYear: summary.taxYear }   : {}),
+        ...(summary.taxMonth ? { taxMonth: summary.taxMonth } : {}),
+        ...(summary.creditPoints ? { creditPoints: summary.creditPoints } : {}),
+        ...(summary.pensionContributionPct ? { employeePensionPct: summary.pensionContributionPct } : {}),
+      },
+      actuals: {
+        ...prev.actuals,
+        ...(summary.netToBank ? { actualNetToBank: summary.netToBank } : {}),
+        ...(summary.totalPayments ? { totalPayments: summary.totalPayments } : {}),
+      },
+    }));
   }
 
   function handleReset() {

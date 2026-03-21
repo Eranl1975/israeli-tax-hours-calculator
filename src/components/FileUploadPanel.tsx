@@ -1,20 +1,70 @@
 import { useState, useRef, useCallback } from 'react';
 import type { UploadedFile } from '../models/types';
 import type { PayslipComponent } from '../models/types';
+import type { ExtractedRow, ExtractedSummary } from '../services/payslipExtractor';
 import { extractFromFile } from '../services/payslipExtractor';
 import { createComponent } from '../services/componentClassifier';
+import { formatILS } from '../utils/currency';
 
 interface Props {
-  onImport: (components: PayslipComponent[]) => void;
+  onImport: (components: PayslipComponent[], summary: ExtractedSummary) => void;
+}
+
+// Extend UploadedFile state to track extraction results
+interface UploadedFileState extends UploadedFile {
+  progress?: number;
+  progressStatus?: string;
+  extractedRows?: ExtractedRow[];
+  summary?: ExtractedSummary;
 }
 
 function ProgressBar({ pct }: { pct: number }) {
   return (
-    <div className="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
+    <div className="w-full bg-gray-200 rounded-full h-1.5 overflow-hidden mt-1">
       <div
-        className="h-1.5 bg-blue-500 rounded-full transition-all duration-200"
+        className="h-1.5 bg-blue-500 rounded-full transition-all duration-150"
         style={{ width: `${pct}%` }}
       />
+    </div>
+  );
+}
+
+function RowsPreview({ rows }: { rows: ExtractedRow[] }) {
+  const payments   = rows.filter(r => r.amount > 0);
+  const deductions = rows.filter(r => r.amount < 0);
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="mt-2 border border-green-200 rounded-lg overflow-hidden text-xs">
+      <button
+        onClick={() => setExpanded(v => !v)}
+        className="w-full flex justify-between items-center px-3 py-2 bg-green-50 hover:bg-green-100 text-green-800 font-semibold"
+      >
+        <span>✓ {rows.length} שורות זוהו ({payments.length} תשלומים | {deductions.length} ניכויים)</span>
+        <span>{expanded ? '▲' : '▼'}</span>
+      </button>
+      {expanded && (
+        <div className="max-h-48 overflow-y-auto bg-white">
+          <table className="w-full text-xs">
+            <thead className="bg-gray-50 text-gray-500 sticky top-0">
+              <tr>
+                <th className="px-2 py-1 text-right w-10">סמל</th>
+                <th className="px-2 py-1 text-right">תיאור</th>
+                <th className="px-2 py-1 text-right w-20">סכום</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} className={`border-t border-gray-50 ${r.amount < 0 ? 'text-red-700' : 'text-gray-800'}`}>
+                  <td className="px-2 py-0.5 text-gray-400">{r.code ?? '—'}</td>
+                  <td className="px-2 py-0.5 truncate max-w-32">{r.description}</td>
+                  <td className="px-2 py-0.5 text-right font-medium">{formatILS(r.amount)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -23,16 +73,19 @@ function FileCard({
   uf,
   onRemove,
   onProcess,
+  onApply,
 }: {
-  uf: UploadedFile;
+  uf: UploadedFileState;
   onRemove: () => void;
   onProcess: (id: string) => void;
+  onApply: (id: string) => void;
 }) {
   return (
     <div className={`relative rounded-xl border p-3 text-xs flex gap-3 items-start ${
-      uf.status === 'error' ? 'border-red-200 bg-red-50' :
-      uf.status === 'done'  ? 'border-green-200 bg-green-50' :
-      'border-gray-200 bg-white'
+      uf.status === 'error'      ? 'border-red-200 bg-red-50' :
+      uf.status === 'done'       ? 'border-green-200 bg-green-50' :
+      uf.status === 'processing' ? 'border-blue-200 bg-blue-50' :
+                                   'border-gray-200 bg-white'
     }`}>
       {/* Thumbnail / icon */}
       {uf.preview ? (
@@ -55,15 +108,31 @@ function FileCard({
             חלץ נתונים
           </button>
         )}
+
         {uf.status === 'processing' && (
           <div className="mt-2">
-            <ProgressBar pct={50} />
-            <p className="text-blue-600 mt-1">מזהה טקסט...</p>
+            <p className="text-blue-700">{uf.progressStatus ?? 'מעבד...'}</p>
+            <ProgressBar pct={uf.progress ?? 10} />
           </div>
         )}
-        {uf.status === 'done' && (
-          <p className="text-green-700 mt-1 font-medium">✓ זוהה בהצלחה</p>
+
+        {uf.status === 'done' && uf.extractedRows && (
+          <div>
+            <RowsPreview rows={uf.extractedRows} />
+            {uf.extractedRows.length > 0 && (
+              <button
+                onClick={() => onApply(uf.id)}
+                className="mt-2 w-full bg-green-600 hover:bg-green-700 text-white rounded-lg px-3 py-1.5 text-xs font-semibold"
+              >
+                ← הכנס לטבלה ({uf.extractedRows.length} שורות)
+              </button>
+            )}
+            {uf.extractedRows.length === 0 && (
+              <p className="mt-1 text-amber-700">לא זוהו שורות — בדוק את איכות הצילום</p>
+            )}
+          </div>
         )}
+
         {uf.status === 'error' && (
           <p className="text-red-600 mt-1">{uf.errorMessage ?? 'שגיאה בעיבוד'}</p>
         )}
@@ -81,12 +150,12 @@ function FileCard({
 }
 
 export function FileUploadPanel({ onImport }: Props) {
-  const [files, setFiles] = useState<UploadedFile[]>([]);
+  const [files, setFiles] = useState<UploadedFileState[]>([]);
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   function addFiles(fileList: FileList) {
-    const newFiles: UploadedFile[] = Array.from(fileList).map(file => ({
+    const newFiles: UploadedFileState[] = Array.from(fileList).map(file => ({
       id: crypto.randomUUID(),
       file,
       isPdf: file.type === 'application/pdf',
@@ -108,32 +177,42 @@ export function FileUploadPanel({ onImport }: Props) {
     const uf = files.find(f => f.id === id);
     if (!uf) return;
 
-    setFiles(prev => prev.map(f => f.id === id ? { ...f, status: 'processing' } : f));
-    try {
-      const { text, data } = await extractFromFile(uf.file, () => {});
-      setFiles(prev => prev.map(f =>
-        f.id === id ? { ...f, status: 'done', ocrText: text } : f,
-      ));
+    setFiles(prev => prev.map(f =>
+      f.id === id ? { ...f, status: 'processing', progress: 0, progressStatus: 'מתחיל...' } : f,
+    ));
 
-      // Convert extracted data to components
-      const comps: PayslipComponent[] = [];
-      if (data.baseMonthlyGross) {
-        comps.push(createComponent('שכר יסוד', data.baseMonthlyGross, 'ocr'));
-      }
-      if (data.overtimeIncome) {
-        comps.push(createComponent('שעות נוספות', data.overtimeIncome, 'ocr'));
-      }
-      if (data.bonusIncome) {
-        comps.push(createComponent('בונוס', data.bonusIncome, 'ocr'));
-      }
-      if (comps.length > 0) {
-        onImport(comps);
-      }
+    try {
+      const { rows, summary } = await extractFromFile(uf.file, (pct, status) => {
+        setFiles(prev => prev.map(f =>
+          f.id === id ? { ...f, progress: pct, progressStatus: status } : f,
+        ));
+      });
+
+      setFiles(prev => prev.map(f =>
+        f.id === id
+          ? { ...f, status: 'done', extractedRows: rows, summary, progress: 100 }
+          : f,
+      ));
     } catch (err) {
       setFiles(prev => prev.map(f =>
         f.id === id ? { ...f, status: 'error', errorMessage: String(err) } : f,
       ));
     }
+  }
+
+  function applyFile(id: string) {
+    const uf = files.find(f => f.id === id);
+    if (!uf?.extractedRows) return;
+
+    const comps: PayslipComponent[] = uf.extractedRows.map(row =>
+      createComponent(row.description, row.amount, 'ocr', {
+        ...(row.code ? { code: row.code } : {}),
+        ...(row.quantity !== undefined ? { quantity: row.quantity } : {}),
+        ...(row.rate !== undefined ? { rate: row.rate } : {}),
+      }),
+    );
+
+    onImport(comps, uf.summary ?? {});
   }
 
   const onDrop = useCallback((e: React.DragEvent) => {
@@ -142,61 +221,60 @@ export function FileUploadPanel({ onImport }: Props) {
     if (e.dataTransfer.files.length > 0) addFiles(e.dataTransfer.files);
   }, []);
 
+  const pendingFiles = files.filter(f => f.status === 'pending');
+
   return (
-    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-      <div className="px-5 py-4 border-b border-gray-100">
-        <h2 className="text-sm font-bold text-gray-700">העלאת תלושי שכר</h2>
-        <p className="text-xs text-gray-400 mt-0.5">JPG, PNG, WEBP, PDF — OCR מקומי, ללא שרת חיצוני</p>
+    <div className="space-y-3">
+      {/* Drop zone */}
+      <div
+        onDragOver={e => { e.preventDefault(); setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={onDrop}
+        onClick={() => inputRef.current?.click()}
+        className={`border-2 border-dashed rounded-xl py-6 text-center cursor-pointer transition-colors ${
+          dragging ? 'border-blue-400 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-gray-50'
+        }`}
+      >
+        <div className="text-3xl mb-1">📂</div>
+        <p className="text-sm text-gray-500">
+          גרור קבצים לכאן, או{' '}
+          <span className="text-blue-600 font-semibold">לחץ לבחירה</span>
+        </p>
+        <p className="text-xs text-gray-400 mt-0.5">JPG · PNG · WEBP · PDF</p>
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          accept=".jpg,.jpeg,.png,.webp,.pdf"
+          className="hidden"
+          onChange={e => e.target.files && addFiles(e.target.files)}
+        />
       </div>
 
-      <div className="p-4 space-y-3">
-        {/* Drop zone */}
-        <div
-          onDragOver={e => { e.preventDefault(); setDragging(true); }}
-          onDragLeave={() => setDragging(false)}
-          onDrop={onDrop}
-          onClick={() => inputRef.current?.click()}
-          className={`border-2 border-dashed rounded-xl py-8 text-center cursor-pointer transition-colors ${
-            dragging ? 'border-blue-400 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-gray-50'
-          }`}
-        >
-          <div className="text-3xl mb-2">📂</div>
-          <p className="text-sm text-gray-500">גרור קבצים לכאן, או <span className="text-blue-600 font-semibold">לחץ לבחירה</span></p>
-          <p className="text-xs text-gray-400 mt-1">JPG · PNG · WEBP · PDF</p>
-          <input
-            ref={inputRef}
-            type="file"
-            multiple
-            accept=".jpg,.jpeg,.png,.webp,.pdf"
-            className="hidden"
-            onChange={e => e.target.files && addFiles(e.target.files)}
-          />
+      {/* File list */}
+      {files.length > 0 && (
+        <div className="space-y-2">
+          {files.map(uf => (
+            <FileCard
+              key={uf.id}
+              uf={uf}
+              onRemove={() => removeFile(uf.id)}
+              onProcess={processFile}
+              onApply={applyFile}
+            />
+          ))}
         </div>
+      )}
 
-        {/* File list */}
-        {files.length > 0 && (
-          <div className="space-y-2">
-            {files.map(uf => (
-              <FileCard
-                key={uf.id}
-                uf={uf}
-                onRemove={() => removeFile(uf.id)}
-                onProcess={processFile}
-              />
-            ))}
-          </div>
-        )}
-
-        {/* Process all button */}
-        {files.some(f => f.status === 'pending') && (
-          <button
-            onClick={() => files.filter(f => f.status === 'pending').forEach(f => processFile(f.id))}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl py-2.5 transition-colors"
-          >
-            חלץ נתונים מכל הקבצים
-          </button>
-        )}
-      </div>
+      {/* Process all button */}
+      {pendingFiles.length > 1 && (
+        <button
+          onClick={() => pendingFiles.forEach(f => processFile(f.id))}
+          className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl py-2.5 transition-colors"
+        >
+          חלץ נתונים מכל הקבצים ({pendingFiles.length})
+        </button>
+      )}
     </div>
   );
 }
