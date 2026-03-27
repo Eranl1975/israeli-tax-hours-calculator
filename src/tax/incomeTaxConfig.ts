@@ -29,18 +29,20 @@ export const INCOME_TAX_CONFIG_2025: IncomeTaxConfig = {
   surtaxRate: 0.03,
 };
 
-// Proposed 2026 brackets (provisional — update when legislated)
+// Proposed 2026 brackets — based on government-approved bracket widening
+// Source: Israeli government decision to widen middle-class tax brackets.
+// Annual: 84,120 / 120,720 / 228,000 / 301,200 / 558,240 / 721,560
 export const INCOME_TAX_CONFIG_2026: IncomeTaxConfig = {
   id: 'income-tax-2026',
-  name: 'מדרגות מס הכנסה 2026 (הצעה)',
+  name: 'מדרגות מס הכנסה 2026 (מוצעות)',
   year: 2026,
-  notes: 'הצעה בלבד — טרם אושרה בחקיקה. עדכן כשיתפרסמו הנתונים הרשמיים.',
+  notes: 'הצעת ממשלה לשנת 2026 — הרחבת מדרגת 20% עד ₪19,000 ו-31% עד ₪25,100.',
   brackets: [
     { min: 0,      max: 7010,   rate: 0.10, label: '10%' },
     { min: 7010,   max: 10060,  rate: 0.14, label: '14%' },
-    { min: 10060,  max: 16150,  rate: 0.20, label: '20%' },
-    { min: 16150,  max: 26920,  rate: 0.31, label: '31%' },  // expanded
-    { min: 26920,  max: 46520,  rate: 0.35, label: '35%' },
+    { min: 10060,  max: 19000,  rate: 0.20, label: '20%' },  // expanded: was 16,150
+    { min: 19000,  max: 25100,  rate: 0.31, label: '31%' },  // expanded: was 22,440
+    { min: 25100,  max: 46520,  rate: 0.35, label: '35%' },
     { min: 46520,  max: 60130,  rate: 0.47, label: '47%' },
     { min: 60130,  max: null,   rate: 0.50, label: '50%' },
   ],
