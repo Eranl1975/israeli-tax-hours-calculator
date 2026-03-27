@@ -1,12 +1,10 @@
 import { useState, useMemo } from 'react';
-import type { PayslipComponent } from '../models/types';
-import type { ExtractedSummary } from '../services/payslipExtractor';
+import type { ExtractedData } from '../services/payslipExtractor';
 import { calculateIncomeTax } from '../tax/incomeTaxEngine';
 import { calculateNL } from '../tax/nlEngine';
 import { INCOME_TAX_CONFIG_2025, INCOME_TAX_CONFIG_2026 } from '../tax/incomeTaxConfig';
 import { NL_CONFIG_2025 } from '../tax/nlConfig';
 import { FileUploadPanel } from '../components/FileUploadPanel';
-import { DEDUCTION_TYPES } from '../domain/calculationEngine';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 function fmt(n: number) {
@@ -192,16 +190,9 @@ export function MainPage() {
   const taxSavings = current.incomeTax - proposed.incomeTax;
   const hasData = gross > 0;
 
-  function handleImport(comps: PayslipComponent[], summary: ExtractedSummary) {
-    // Gross = sum of all non-deduction component amounts
-    const compsGross = comps
-      .filter(c => !DEDUCTION_TYPES.includes(c.componentType))
-      .reduce((s, c) => s + Math.abs(c.amount), 0);
-    if (compsGross > 0) setGross(Math.round(compsGross));
-    if (summary.creditPoints)           setCreditPoints(summary.creditPoints);
-    if (summary.pensionContributionPct) setPensionPct(summary.pensionContributionPct);
-    if (summary.taxMonth)               setMonth(summary.taxMonth);
-    if (summary.taxYear)                setYear(summary.taxYear);
+  function handleImport(data: ExtractedData) {
+    if (data.gross        !== undefined) setGross(data.gross);
+    if (data.creditPoints !== undefined) setCreditPoints(data.creditPoints);
   }
 
   return (

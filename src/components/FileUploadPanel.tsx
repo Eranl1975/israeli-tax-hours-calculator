@@ -1,21 +1,22 @@
 import { useState, useRef, useCallback } from 'react';
-import type { UploadedFile } from '../models/types';
-import type { PayslipComponent } from '../models/types';
-import type { ExtractedRow, ExtractedSummary } from '../services/payslipExtractor';
+import type { ExtractedData } from '../services/payslipExtractor';
 import { extractFromFile } from '../services/payslipExtractor';
-import { createComponent } from '../services/componentClassifier';
-import { formatILS } from '../utils/currency';
 
 interface Props {
-  onImport: (components: PayslipComponent[], summary: ExtractedSummary) => void;
+  onImport: (data: ExtractedData) => void;
 }
 
-// Extend UploadedFile state to track extraction results
-interface UploadedFileState extends UploadedFile {
+type FileStatus = 'pending' | 'processing' | 'done' | 'error';
+
+interface UploadedFile {
+  id: string;
+  file: File;
+  preview?: string;
+  status: FileStatus;
   progress?: number;
   progressStatus?: string;
-  extractedRows?: ExtractedRow[];
-  summary?: ExtractedSummary;
+  result?: ExtractedData;
+  errorMessage?: string;
 }
 
 function ProgressBar({ pct }: { pct: number }) {
@@ -29,42 +30,8 @@ function ProgressBar({ pct }: { pct: number }) {
   );
 }
 
-function RowsPreview({ rows }: { rows: ExtractedRow[] }) {
-  const payments   = rows.filter(r => r.amount > 0);
-  const deductions = rows.filter(r => r.amount < 0);
-  const [expanded, setExpanded] = useState(false);
-
-  return (
-    <div className="mt-2 border border-green-200 rounded-lg overflow-hidden text-xs">
-      <button
-        onClick={() => setExpanded(v => !v)}
-        className="w-full flex justify-between items-center px-3 py-2 bg-green-50 hover:bg-green-100 text-green-800 font-semibold"
-      >
-        <span>✓ {rows.length} שורות ({payments.length} תשלומים | {deductions.length} ניכויים)</span>
-        <span>{expanded ? '▲' : '▼'}</span>
-      </button>
-      {expanded && (
-        <div className="max-h-48 overflow-y-auto bg-white">
-          <table className="w-full text-xs">
-            <thead className="bg-gray-50 text-gray-500 sticky top-0">
-              <tr>
-                <th className="px-2 py-1 text-right w-12">סמל</th>
-                <th className="px-2 py-1 text-right">סכום</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, i) => (
-                <tr key={i} className={`border-t border-gray-50 ${r.amount < 0 ? 'text-red-700' : 'text-gray-800'}`}>
-                  <td className="px-2 py-0.5 text-gray-400 font-mono">{r.code ?? '—'}</td>
-                  <td className="px-2 py-0.5 text-right font-medium">{formatILS(r.amount)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  );
+function fmt(n: number) {
+  return new Intl.NumberFormat('he-IL', { style: 'currency', currency: 'ILS', maximumFractionDigits: 0 }).format(n);
 }
 
 function FileCard({
@@ -73,19 +40,20 @@ function FileCard({
   onProcess,
   onApply,
 }: {
-  uf: UploadedFileState;
+  uf: UploadedFile;
   onRemove: () => void;
   onProcess: (id: string) => void;
   onApply: (id: string) => void;
 }) {
+  const borderClass =
+    uf.status === 'error'      ? 'border-red-200 bg-red-50'   :
+    uf.status === 'done'       ? 'border-green-200 bg-green-50' :
+    uf.status === 'processing' ? 'border-blue-200 bg-blue-50'  :
+                                 'border-gray-200 bg-white';
+
   return (
-    <div className={`relative rounded-xl border p-3 text-xs flex gap-3 items-start ${
-      uf.status === 'error'      ? 'border-red-200 bg-red-50' :
-      uf.status === 'done'       ? 'border-green-200 bg-green-50' :
-      uf.status === 'processing' ? 'border-blue-200 bg-blue-50' :
-                                   'border-gray-200 bg-white'
-    }`}>
-      {/* Thumbnail / icon */}
+    <div className={`relative rounded-xl border p-3 text-xs flex gap-3 items-start ${borderClass}`}>
+      {/* Thumbnail */}
       {uf.preview ? (
         <img src={uf.preview} alt="" className="w-12 h-16 object-cover rounded border border-gray-200 flex-shrink-0" />
       ) : (
@@ -114,19 +82,28 @@ function FileCard({
           </div>
         )}
 
-        {uf.status === 'done' && uf.extractedRows && (
-          <div>
-            <RowsPreview rows={uf.extractedRows} />
-            {uf.extractedRows.length > 0 && (
+        {uf.status === 'done' && uf.result && (
+          <div className="mt-2 space-y-1">
+            {/* Show only what was found */}
+            {uf.result.gross !== undefined ? (
+              <p className="text-green-800 font-semibold">
+                ✓ ברוטו: <span className="text-base">{fmt(uf.result.gross)}</span>
+              </p>
+            ) : (
+              <p className="text-amber-700">⚠ לא נמצאה שורת "סך-הכל התשלומים"</p>
+            )}
+            {uf.result.creditPoints !== undefined && (
+              <p className="text-green-700">
+                ✓ נקודות זיכוי: {uf.result.creditPoints}
+              </p>
+            )}
+            {(uf.result.gross !== undefined || uf.result.creditPoints !== undefined) && (
               <button
                 onClick={() => onApply(uf.id)}
-                className="mt-2 w-full bg-green-600 hover:bg-green-700 text-white rounded-lg px-3 py-1.5 text-xs font-semibold"
+                className="mt-1 w-full bg-green-600 hover:bg-green-700 text-white rounded-lg px-3 py-1.5 text-xs font-semibold"
               >
-                ← הכנס לטבלה ({uf.extractedRows.length} שורות)
+                ← הכנס לחישוב
               </button>
-            )}
-            {uf.extractedRows.length === 0 && (
-              <p className="mt-1 text-amber-700">לא זוהו שורות — בדוק את איכות הצילום</p>
             )}
           </div>
         )}
@@ -139,7 +116,6 @@ function FileCard({
       <button
         onClick={onRemove}
         className="text-gray-300 hover:text-red-500 font-bold text-lg leading-none flex-shrink-0"
-        title="הסר קובץ"
       >
         ✕
       </button>
@@ -148,15 +124,14 @@ function FileCard({
 }
 
 export function FileUploadPanel({ onImport }: Props) {
-  const [files, setFiles] = useState<UploadedFileState[]>([]);
+  const [files, setFiles] = useState<UploadedFile[]>([]);
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   function addFiles(fileList: FileList) {
-    const newFiles: UploadedFileState[] = Array.from(fileList).map(file => ({
+    const newFiles: UploadedFile[] = Array.from(fileList).map(file => ({
       id: crypto.randomUUID(),
       file,
-      isPdf: file.type === 'application/pdf',
       status: 'pending',
       preview: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
     }));
@@ -180,16 +155,14 @@ export function FileUploadPanel({ onImport }: Props) {
     ));
 
     try {
-      const { rows, summary } = await extractFromFile(uf.file, (pct, status) => {
+      const result = await extractFromFile(uf.file, (pct, status) => {
         setFiles(prev => prev.map(f =>
           f.id === id ? { ...f, progress: pct, progressStatus: status } : f,
         ));
       });
 
       setFiles(prev => prev.map(f =>
-        f.id === id
-          ? { ...f, status: 'done', extractedRows: rows, summary, progress: 100 }
-          : f,
+        f.id === id ? { ...f, status: 'done', result, progress: 100 } : f,
       ));
     } catch (err) {
       setFiles(prev => prev.map(f =>
@@ -200,17 +173,7 @@ export function FileUploadPanel({ onImport }: Props) {
 
   function applyFile(id: string) {
     const uf = files.find(f => f.id === id);
-    if (!uf?.extractedRows) return;
-
-    const comps: PayslipComponent[] = uf.extractedRows.map(row =>
-      createComponent(row.description, row.amount, 'ocr', {
-        ...(row.code ? { code: row.code } : {}),
-        ...(row.quantity !== undefined ? { quantity: row.quantity } : {}),
-        ...(row.rate !== undefined ? { rate: row.rate } : {}),
-      }),
-    );
-
-    onImport(comps, uf.summary ?? {});
+    if (uf?.result) onImport(uf.result);
   }
 
   const onDrop = useCallback((e: React.DragEvent) => {
@@ -264,13 +227,12 @@ export function FileUploadPanel({ onImport }: Props) {
         </div>
       )}
 
-      {/* Process all button */}
       {pendingFiles.length > 1 && (
         <button
           onClick={() => pendingFiles.forEach(f => processFile(f.id))}
           className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl py-2.5 transition-colors"
         >
-          חלץ נתונים מכל הקבצים ({pendingFiles.length})
+          חלץ מכל הקבצים ({pendingFiles.length})
         </button>
       )}
     </div>
