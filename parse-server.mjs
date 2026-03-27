@@ -2,8 +2,10 @@
  * LiteParse local API server
  *
  * Runs entirely on localhost (127.0.0.1) — no file data ever leaves this machine.
- * Accepts payslip uploads (PDF / PNG / JPG), parses them with LiteParse (local OCR),
- * and returns the extracted text to the React frontend.
+ *
+ * Routing:
+ *   PDF  → LiteParse  (PDF.js + optional Tesseract for scanned pages)
+ *   Image (JPG/PNG/TIFF/WEBP) → Tesseract.js directly (no ImageMagick needed)
  *
  * Security measures:
  *  - Binds to 127.0.0.1 only (never 0.0.0.0)
@@ -17,9 +19,10 @@
 import express from 'express';
 import multer from 'multer';
 import { LiteParse } from '@llamaindex/liteparse';
+import { createWorker } from 'tesseract.js';
 import { tmpdir } from 'os';
 import { unlink, rename } from 'fs/promises';
-import { join, extname } from 'path';
+import { join } from 'path';
 import { randomUUID } from 'crypto';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -38,12 +41,16 @@ const ALLOWED_MIME_TYPES = new Set([
 
 const MIME_TO_EXT = {
   'application/pdf': '.pdf',
-  'image/png': '.png',
-  'image/jpeg': '.jpg',
-  'image/jpg': '.jpg',
-  'image/tiff': '.tiff',
-  'image/webp': '.webp',
+  'image/png':       '.png',
+  'image/jpeg':      '.jpg',
+  'image/jpg':       '.jpg',
+  'image/tiff':      '.tiff',
+  'image/webp':      '.webp',
 };
+
+const IMAGE_MIME_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/jpg', 'image/tiff', 'image/webp',
+]);
 
 // ─── Express setup ───────────────────────────────────────────────────────────
 const app = express();
@@ -83,17 +90,41 @@ const upload = multer({
   },
 });
 
+// ─── OCR image via Tesseract.js (no ImageMagick required) ────────────────────
+async function ocrImage(imagePath) {
+  const worker = await createWorker('heb+eng', 1, {
+    // Keep all processing local
+    cachePath: join(tmpdir(), 'tesseract-cache'),
+  });
+  try {
+    const { data } = await worker.recognize(imagePath);
+    return data.text ?? '';
+  } finally {
+    await worker.terminate();
+  }
+}
+
+// ─── Parse PDF via LiteParse ─────────────────────────────────────────────────
+async function parsePdf(pdfPath) {
+  const parser = new LiteParse({
+    ocrEnabled: true,
+    ocrLanguage: 'heb+eng',
+  });
+  const result = await parser.parse(pdfPath);
+  return typeof result === 'string'
+    ? result
+    : (result.text ?? result.markdown ?? '');
+}
+
 // ─── Health check ────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', engine: 'liteparse', local: true });
+  res.json({ status: 'ok', engine: 'liteparse+tesseract', local: true });
 });
 
 // ─── Parse endpoint ──────────────────────────────────────────────────────────
 app.options('/api/parse', (_req, res) => res.sendStatus(200));
 
 app.post('/api/parse', upload.single('file'), async (req, res) => {
-  // multer stores the file at req.file.path WITHOUT the correct extension.
-  // LiteParse detects format by extension, so we rename it first.
   let tmpPath = req.file?.path;
   let renamedPath;
 
@@ -103,27 +134,29 @@ app.post('/api/parse', upload.single('file'), async (req, res) => {
       return;
     }
 
-    // Give the temp file its correct extension so LiteParse can detect the type
+    // Give the temp file its correct extension so parsers can detect the type
     const ext = MIME_TO_EXT[req.file.mimetype] ?? '.bin';
     renamedPath = join(tmpdir(), `lp-${randomUUID()}${ext}`);
     await rename(tmpPath, renamedPath);
-    tmpPath = null; // original path no longer valid
+    tmpPath = null;
 
-    const parser = new LiteParse({
-      ocrEnabled: true,
-      ocrLanguage: 'heb+eng', // Hebrew + English — no data sent externally
-    });
+    let text;
+    if (IMAGE_MIME_TYPES.has(req.file.mimetype)) {
+      // Images: use Tesseract.js directly — no ImageMagick needed
+      console.log(`[parse] image OCR → ${req.file.originalname}`);
+      text = await ocrImage(renamedPath);
+    } else {
+      // PDF: use LiteParse (PDF.js + Tesseract for scanned pages)
+      console.log(`[parse] PDF parse → ${req.file.originalname}`);
+      text = await parsePdf(renamedPath);
+    }
 
-    const result = await parser.parse(renamedPath);
-    const text = typeof result === 'string' ? result : (result.text ?? result.markdown ?? '');
-
-    res.json({ text, pages: result.pages ?? 1 });
+    res.json({ text });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error('[LiteParse] Parse error:', msg);
+    console.error('[parse] error:', msg);
     res.status(500).json({ error: msg });
   } finally {
-    // Always delete temp files — even on error
     if (tmpPath)     unlink(tmpPath).catch(() => {});
     if (renamedPath) unlink(renamedPath).catch(() => {});
   }
@@ -132,12 +165,12 @@ app.post('/api/parse', upload.single('file'), async (req, res) => {
 // ─── Error handler ───────────────────────────────────────────────────────────
 app.use((err, _req, res, _next) => {
   const msg = err instanceof Error ? err.message : String(err);
-  console.error('[LiteParse] Unhandled error:', msg);
+  console.error('[parse] unhandled error:', msg);
   res.status(400).json({ error: msg });
 });
 
 // ─── Start ───────────────────────────────────────────────────────────────────
 app.listen(PORT, HOST, () => {
-  console.log(`✓ LiteParse server  http://${HOST}:${PORT}`);
-  console.log('  כל העיבוד מתבצע מקומית — אין שידור נתונים לשום שרת חיצוני.');
+  console.log(`✓ Parse server  http://${HOST}:${PORT}`);
+  console.log('  PDF → LiteParse | Images → Tesseract.js | 100% local');
 });
