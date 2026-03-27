@@ -1,18 +1,13 @@
 // ============================================================
-// Payslip OCR Extractor
-// Converts an uploaded image or PDF to text using Tesseract.js,
-// then parses the component table row-by-row.
-// Runs entirely in the browser — no API key required.
+// Payslip Extractor — powered by LiteParse (local server)
+//
+// Files are sent to a local Express/LiteParse server on
+// http://127.0.0.1:3001 (proxied via Vite as /api/parse).
+// ALL processing happens on this machine — no data is ever
+// transmitted to any external server or cloud service.
 // ============================================================
 
-import Tesseract from 'tesseract.js';
-import * as pdfjsLib from 'pdfjs-dist';
 import { isDeductionCode } from './componentClassifier';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url,
-).toString();
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,55 +37,40 @@ export interface ExtractedSummary {
 export type OcrProgressCallback = (pct: number, status: string) => void;
 
 // ---------------------------------------------------------------------------
-// Step 1: File → image data URL
+// Step 1+2 (combined): Upload file → local LiteParse server → text
+//
+// The server runs on http://127.0.0.1:3001, proxied by Vite as /api/parse.
+// No data leaves the machine at any point.
 // ---------------------------------------------------------------------------
-export async function fileToImageDataUrl(
+export async function parseViaServer(
   file: File,
   onProgress: OcrProgressCallback,
 ): Promise<string> {
-  if (file.type === 'application/pdf') {
-    onProgress(5, 'טוען PDF...');
-    return pdfFirstPageToDataUrl(file);
+  onProgress(10, 'שולח קובץ לשרת מקומי...');
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  let response: Response;
+  try {
+    response = await fetch('/api/parse', {
+      method: 'POST',
+      body: formData,
+    });
+  } catch {
+    throw new Error(
+      'שרת LiteParse אינו זמין. הרץ: npm run dev (מפעיל גם את שרת הניתוח)',
+    );
   }
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
 
-async function pdfFirstPageToDataUrl(file: File): Promise<string> {
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-  const page = await pdf.getPage(1);
-  const viewport = page.getViewport({ scale: 2.5 }); // higher scale = better OCR
-  const canvas = document.createElement('canvas');
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-  const ctx = canvas.getContext('2d')!;
-  await page.render({ canvasContext: ctx, viewport, canvas }).promise;
-  return canvas.toDataURL('image/png');
-}
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+    throw new Error(`שגיאת ניתוח: ${body.error ?? response.statusText}`);
+  }
 
-// ---------------------------------------------------------------------------
-// Step 2: OCR
-// ---------------------------------------------------------------------------
-export async function runOcr(
-  imageDataUrl: string,
-  onProgress: OcrProgressCallback,
-): Promise<string> {
-  const result = await Tesseract.recognize(imageDataUrl, 'heb+eng', {
-    logger: m => {
-      if (m.status === 'recognizing text') {
-        onProgress(
-          15 + Math.round(m.progress * 70),
-          `מזהה טקסט... ${Math.round(m.progress * 100)}%`,
-        );
-      }
-    },
-  });
-  return result.data.text;
+  onProgress(80, 'מנתח תוצאות...');
+  const { text } = (await response.json()) as { text: string };
+  return text ?? '';
 }
 
 // ---------------------------------------------------------------------------
@@ -469,9 +449,7 @@ export async function extractFromFile(
   onProgress: OcrProgressCallback,
 ): Promise<{ text: string; rows: ExtractedRow[]; summary: ExtractedSummary }> {
   onProgress(0, 'מתחיל...');
-  const imageDataUrl = await fileToImageDataUrl(file, onProgress);
-  onProgress(12, 'מריץ זיהוי טקסט...');
-  const text = await runOcr(imageDataUrl, onProgress);
+  const text = await parseViaServer(file, onProgress);
   onProgress(87, 'מנתח שורות...');
   const rows = extractComponentRows(text);
   onProgress(94, 'מחלץ סיכומים...');
