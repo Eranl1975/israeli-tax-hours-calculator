@@ -137,9 +137,88 @@ const SKIP_LINE_PATTERNS = [
   /סה[""']?כ\s*ניכויים/,
 ];
 
+// ── Noise detection ─────────────────────────────────────────────────────────
+
+/**
+ * Whole-line patterns that immediately disqualify a line as a component row.
+ * These catch IDs, phone numbers, account numbers, and date strings.
+ */
+const NOISE_WHOLE_LINE: RegExp[] = [
+  /\d{8,}/,                         // 8+ consecutive digits → ID / phone / account
+  /\d{1,2}\/\d{1,2}\/20\d{2}/,      // Date: dd/mm/yyyy
+  /\d{1,2}\/20\d{2}/,               // Date: mm/yyyy
+  /^\s*[\d\s,.\-+]+\s*$/,           // Line is only digits / punctuation
+  /^\s*[a-zA-Z\d\s@.\-]+\s*$/,      // Line is only English letters + digits (no Hebrew)
+];
+
+/**
+ * Keywords that mark a description as organizational / personal / address info —
+ * i.e. NOT a salary component.
+ */
+const NOISE_DESCRIPTION_WORDS = [
+  // Municipalities and government
+  'עיריית', 'עירייה', 'עיריה', 'עיריית', 'מועצה', 'מועצת', 'מועצה מקומית',
+  'ממשלה', 'ממשלת', 'משרד הפנים', 'משרד הכלכלה', 'משרד',
+  'רשות מקומית', 'אזור תעשייה',
+  // Corporate / legal entity indicators
+  'בע"מ', 'בעמ', "בע'מ", 'עמותה', 'אגודה שיתופית', 'אגודה',
+  'מוסד', 'קיבוץ', 'מושב', 'קואופרטיב',
+  // Personal info labels
+  'שם עובד', 'שם המעסיק', 'שם מעסיק', 'מספר עובד', 'מס. עובד',
+  'תעודת זהות', 'ת.ז',
+  // Address
+  'רחוב ', 'רח. ', 'ת.ד.', 'ד.נ.', 'מיקוד', 'פ.ת.',
+  // Bank account (without salary context)
+  'חשבון בנק', 'מספר חשבון', 'סניף בנק',
+];
+
+/**
+ * Salary/deduction keywords that give HIGH confidence a line is a real row.
+ * If a description contains any of these, it passes even without a valid code.
+ */
+const SALARY_CONFIDENCE_KEYWORDS = [
+  'שכר', 'שעות', 'נוספות', 'חלף', 'שווי', 'גילום', 'גלום', 'מגולם', 'מגלם',
+  'תיקון', 'פנסיה', 'קה"ש', 'קרן', 'ביטוח לאומי', 'ביטוח בריאות',
+  'מס הכנסה', 'ועד', 'הלוואה', 'מענק', 'בונוס', 'פרמיה', 'תוספת',
+  'הפרש', 'רטרו', 'זקיפה', 'שח"ת', 'ארוחות', 'נופש', 'מונית',
+  'נסיעות', 'ניכוי', 'אובדן', 'מקדמה',
+];
+
 function isSkipLine(line: string): boolean {
   const l = line.trim();
   return l.length < 3 || SKIP_LINE_PATTERNS.some(rx => rx.test(l));
+}
+
+/** Reject line if it contains obvious non-payslip patterns */
+function isNoiseLine(line: string): boolean {
+  return NOISE_WHOLE_LINE.some(rx => rx.test(line));
+}
+
+/** Reject if description text flags city / org / personal / address */
+function isNoiseDescription(desc: string): boolean {
+  const d = desc.toLowerCase();
+  return NOISE_DESCRIPTION_WORDS.some(kw => d.includes(kw.toLowerCase()));
+}
+
+/**
+ * Returns true when the description clearly belongs to a salary component
+ * (high confidence — passes even without a numeric code).
+ */
+function hasSalaryKeyword(desc: string): boolean {
+  const d = desc.toLowerCase();
+  return SALARY_CONFIDENCE_KEYWORDS.some(kw => d.includes(kw.toLowerCase()));
+}
+
+/**
+ * Validate that an extracted code string is a plausible payslip component code.
+ * Rejects: tax years (1990-2040), codes < 10 or > 9999.
+ */
+function isValidPayslipCode(code: string | undefined): boolean {
+  if (!code) return false;
+  const n = parseInt(code, 10);
+  if (isNaN(n)) return false;
+  if (n >= 1990 && n <= 2040) return false; // year, not a code
+  return n >= 10 && n <= 9999;
 }
 
 // Keywords indicating a deduction description
@@ -176,6 +255,9 @@ function parseLine(line: string): ExtractedRow | null {
   if (!trimmed) return null;
   if (isSkipLine(trimmed)) return null;
 
+  // Reject lines that are clearly not payslip rows (IDs, dates, etc.)
+  if (isNoiseLine(trimmed)) return null;
+
   // Must contain Hebrew characters
   if (!/[\u0590-\u05FF]/.test(trimmed)) return null;
 
@@ -192,6 +274,9 @@ function parseLine(line: string): ExtractedRow | null {
   } else if (codeEndMatch) {
     code = codeEndMatch[1];
   }
+
+  // Validate the extracted code — reject year-like numbers and out-of-range codes
+  if (!isValidPayslipCode(code)) code = undefined;
 
   // ── Strip percentage numbers and extract remaining numeric tokens ─────────
   const noPct = clean.replace(/\d+\.?\d*\s*%/g, ' __PCT__ ');
@@ -239,6 +324,12 @@ function parseLine(line: string): ExtractedRow | null {
   // Remove lone punctuation
   descRaw = descRaw.replace(/^[,.\-\s]+|[,.\-\s]+$/g, '').trim();
   if (!descRaw || descRaw.length < 2) return null;
+
+  // Reject descriptions that look like org/city/personal names
+  if (isNoiseDescription(descRaw)) return null;
+
+  // Minimum confidence: line must have a valid code OR a known salary keyword
+  if (!isValidPayslipCode(code) && !hasSalaryKeyword(descRaw)) return null;
 
   // ── Determine if deduction ────────────────────────────────────────────────
   const deductionByCode = isDeductionCode(code);
