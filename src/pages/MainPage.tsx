@@ -182,10 +182,18 @@ export function MainPage() {
   const [month, setMonth] = useState(new Date().getMonth() + 1);
   const [year, setYear] = useState(2025);
   const [showUpload, setShowUpload] = useState(false);
+  const [calcKey, setCalcKey]   = useState(0);   // incremented on "חשב מחדש"
+  const [justCalced, setJustCalced] = useState(false);
 
-  // Auto-compute both scenarios — no button needed
-  const current  = useMemo(() => compute(gross, creditPoints, pensionPct, false), [gross, creditPoints, pensionPct]);
-  const proposed = useMemo(() => compute(gross, creditPoints, pensionPct, true),  [gross, creditPoints, pensionPct]);
+  // Re-compute whenever inputs change OR when "חשב מחדש" is clicked
+  const current  = useMemo(() => compute(gross, creditPoints, pensionPct, false), [gross, creditPoints, pensionPct, calcKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const proposed = useMemo(() => compute(gross, creditPoints, pensionPct, true),  [gross, creditPoints, pensionPct, calcKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function handleRecalc() {
+    setCalcKey(k => k + 1);
+    setJustCalced(true);
+    setTimeout(() => setJustCalced(false), 1500);
+  }
 
   const taxSavings = current.incomeTax - proposed.incomeTax;
   const hasData = gross > 0;
@@ -297,6 +305,20 @@ export function MainPage() {
 
           </div>
         </div>
+
+        {/* ── Recalculate button ────────────────────────────────────── */}
+        {hasData && (
+          <button
+            onClick={handleRecalc}
+            className={`w-full font-bold rounded-xl py-3 text-base transition-all shadow-sm ${
+              justCalced
+                ? 'bg-green-500 text-white scale-95'
+                : 'bg-blue-600 hover:bg-blue-700 text-white'
+            }`}
+          >
+            {justCalced ? '✓ חושב!' : '↻ חשב מחדש'}
+          </button>
+        )}
 
         {/* ── Results ───────────────────────────────────────────────── */}
         {!hasData ? (
