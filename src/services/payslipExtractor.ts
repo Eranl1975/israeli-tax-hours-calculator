@@ -71,20 +71,15 @@ function allNums(s: string): number[] {
 }
 
 /**
- * Extract gross (ברוטו לתשלום) from the "סך-הכל התשלומים" line.
+ * Extract gross from the "ברוטו למס הכנסה" line.
  * Looks for several spellings that appear on Israeli payslips.
  */
 function extractGross(text: string): number | undefined {
   const lines = text.split('\n');
   const GROSS_PATTERNS = [
-    /סה[""']?כ\s*תשלומים/,
-    /סך.{0,6}הכל.{0,6}תשלומים/,
-    /סה[""']?כ\s*שכר/,
-    /ברוטו\s*לתשלום/,
-    /שכר\s*ברוטו/,
-    /סה[""']?כ\s*לתשלום/,
-    /סך\s*הכל\s*לתשלום/,
-    /סה[""']?כ\s*ברוטו/,
+    /ברוטו\s*למס\s*הכנסה/,
+    /ברוטו\s*ל[- ]?מס/,
+    /שכר\s*ברוטו\s*למס/,
   ];
 
   for (const line of lines) {
